@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Model weights (large files — keep locally)
+*.pt
+*.pth
+*.onnx
+
+# Recordings and CSV logs
+*.csv
+*.mp4
+*.avi
+*.mkv
+intersafe_recordings/
+
+# Homography and calibration files (machine-specific)
+*.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
