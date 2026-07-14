@@ -117,7 +117,7 @@ CLASS_MAPPING = {
 }
 
 CLASS_COLORS = {
-    "Pedestrian":    (0, 200, 255),
+    "Pedestrian":    (0, 0, 0),
     "Bicycle":       (255, 180, 0),
     "Two-wheeler":   (0, 255, 180),
     "Car":           (255, 255, 255),
