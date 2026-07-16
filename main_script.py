@@ -1,6 +1,11 @@
 """
 main_script.py  —  InterSafe-5G  Unified Entry Point
 =====================================================
+Run this file to start the entire system:
+
+    python3 main_script.py --source RADAR
+    python3 main_script.py --source CAMERA
+    python3 main_script.py --source BOTH
 
 SYSTEM TOPOLOGY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -33,8 +38,7 @@ What lives here
   ✔ TTRC threshold logic
   ✔ Sensor-reading loops (radar + camera)
   ✔ Alert message formatting
-
-=====================================================
+====================================================  
 """
 
 import argparse
@@ -59,13 +63,13 @@ TTRC1_THRESHOLD     = 10.0      # Pedestrian / Bicycle  (s)
 TTRC2_THRESHOLD     = 15.0      # All vehicle classes   (s)
 TTRC1_CLASSES       = {"Pedestrian", "Bicycle"}
 
-PEDESTRIAN_ALERT_COUNT = 2      # group-alert threshold
+GROUP_ALERT_COUNT = 2      # group-alert threshold
 
 # =============================================================================
 # CSV ALERT LOG CONFIG
 # =============================================================================
 
-CSV_OUTPUT_DIR = "/home/coewwt/Videos/intersafe_recordings"   # change to your path
+CSV_OUTPUT_DIR = ""   # change to your path
 os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
 
 _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -101,31 +105,46 @@ def _ttrc_tier(label: str) -> str:
 # =============================================================================
 # ALERT MESSAGE FORMATTER
 # =============================================================================
-
 def _format_alert_message(label: str, track_id, ttrc_s: float,
-                           ped_ids_in_frame: list,
+                           ids_in_frame: list,
                            body_lean: str | None = None) -> str:
+    """
+    Build the human-readable alert string for a single object.
+
+    ids_in_frame — list of IDs of ALL objects of the same class currently
+                   in the frame (used for group-alert detection).
+                   If more than GROUP_ALERT_COUNT objects of this class are
+                   present, the message switches to "Multiple <Class> AHEAD"
+                   regardless of class.  This applies to every class, not
+                   just pedestrians.
+
+    body_lean    — only populated for Pedestrians via pose estimation.
+    """
     tier     = _ttrc_tier(label)
     ttrc_str = f"{ttrc_s:.1f}s [{tier}]"
 
-    if label == "Pedestrian":
-        if len(ped_ids_in_frame) > PEDESTRIAN_ALERT_COUNT:
-            return f"Multiple Pedestrians AHEAD | {ttrc_str}"
-        msg = f"Pedestrian ID:{track_id} AHEAD | {ttrc_str}"
-        if body_lean and body_lean != "straight":
-            msg += f" | moving {body_lean}"
-        return msg
+    # ── Group alert: more than GROUP_ALERT_COUNT of this class in frame ───────
+    if len(ids_in_frame) > GROUP_ALERT_COUNT:
+        # Pluralise the label for the message
+        plural = {
+            "Pedestrian":    "Pedestrians",
+            "Bicycle":       "Bicycles",
+            "Two-wheeler":   "Two-wheelers",
+            "Three-wheeler": "Three-wheelers",
+            "Car":           "Cars",
+            "Bus":           "Buses",
+            "Heavy Vehicle": "Heavy Vehicles",
+        }.get(label, f"{label}s")
+        return f"Multiple {plural} AHEAD | {ttrc_str}"
 
-    labels = {
-        "Bicycle":       f"Bicycle ID:{track_id} AHEAD | {ttrc_str}",
-        "Two-wheeler":   f"Two-wheeler ID:{track_id} AHEAD | {ttrc_str}",
-        "Three-wheeler": f"Three-wheeler ID:{track_id} AHEAD | {ttrc_str}",
-        "Car":           f"Car ID:{track_id} AHEAD | {ttrc_str}",
-        "Bus":           f"Bus ID:{track_id} AHEAD | {ttrc_str}",
-        "Heavy Vehicle": f"Heavy Vehicle ID:{track_id} AHEAD | {ttrc_str}",
-    }
-    return labels.get(label, f"{label} ID:{track_id} AHEAD | {ttrc_str}")
+    # ── Single object alert ───────────────────────────────────────────────────
+    msg = f"{label} ID:{track_id} AHEAD | {ttrc_str}"
 
+    # Body lean is only available for Pedestrians (from pose model)
+    if label == "Pedestrian" and body_lean and body_lean != "straight":
+        msg += f" | moving {body_lean}"
+
+    return msg
 # =============================================================================
 # EMIT ALERT  (build dict, print, hand off to dispatcher)
 # =============================================================================
@@ -143,7 +162,7 @@ def emit_alert(source: str, label: str, object_id: int,
     in alert_dispatcher.  Adding a new channel (SMS, Slack, syslog …)
     means editing alert_dispatcher only.
     """
-    ped_ids_in_frame = ped_ids_in_frame or []
+    ids_in_frame = ids_in_frame or []
     tier             = _ttrc_tier(label)
     status           = "Reached CP" if ttrc < 0.2 else "Reaching CP"
     if timestamp is None:
@@ -165,7 +184,7 @@ def emit_alert(source: str, label: str, object_id: int,
         "direction":        direction,
         "timestamp":        timestamp,
         "alert_message":    alert_message,
-        "ped_ids_in_frame": ped_ids_in_frame,  # forwarded to dispatcher for VMS grouping
+        "ped_ids_in_frame": ids_in_frame,  # forwarded to dispatcher for VMS grouping
     }
 
     # ── CSV log ──────────────────────────────────────────────────────────────
@@ -233,7 +252,7 @@ def process_radar():
 
         if oid not in _radar_alerted:
             _radar_alerted.add(oid)
-            ped_ids = [o["id"] for o in objects if o.get("class") == "Pedestrian"]
+            same_class_ids = [o["id"] for o in objects if o.get("class") == "Pedestrian"]
             emit_alert(
                 source           = "RADAR",
                 label            = label,
@@ -242,7 +261,7 @@ def process_radar():
                 speed_kmh        = speed_kmh,
                 direction        = direction,
                 timestamp        = timestamp,
-                ped_ids_in_frame = ped_ids,
+                ids_in_frame = same_class_ids,
             )
 
 # =============================================================================
@@ -287,7 +306,7 @@ def process_camera():
 
         if oid not in _camera_alerted:
             _camera_alerted.add(oid)
-            ped_ids = [it.get("obj_id", -1) for it in items if it.get("label") == "Pedestrian"]
+            same_class_ids = [it.get("obj_id", -1) for it in items if it.get("label") == "Pedestrian"]
             emit_alert(
                 source           = "CAMERA",
                 label            = label,
@@ -296,7 +315,7 @@ def process_camera():
                 speed_kmh        = speed_kmh,
                 direction        = "",
                 timestamp        = timestamp,
-                ped_ids_in_frame = ped_ids,
+                ped_ids_in_frame = same_class_ids,
                 body_lean        = body_lean,
             )
 

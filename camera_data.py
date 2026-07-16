@@ -551,7 +551,7 @@ def _pipeline_loop():
     # A small window + threshold avoids single-frame detection jitter being
     # mistaken for real movement.
     ROI_HEADING_WINDOW = 5   # frames of py history to judge heading, while inside ROI
-    ROI_MIN_PY_DELTA    = 6  # px net vertical movement needed to call it a direction
+    ROI_MIN_PY_DELTA    = 6  # pixels, net vertical movement needed to call it a direction
 
     # roi_heading_hist: obj_id → deque of py samples, collected only while the
     # object is inside the ROI and not yet approved. Cleared once approved or

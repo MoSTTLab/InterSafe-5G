@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-MEC Radar Server  v2
-=====================
+MEC Radar Client  v3  (RS485 -> Ethernet converter)
+====================================================
 Runs on MEC server (Ubuntu).
 
 Chain:
-  Radar RS485 -> USB-RS485 -> RUTX50 (5G) -> [this script on MEC]
+  Radar RS485 -> USR RS485/Ethernet converter (TCP Server mode)
+              -> RUTX50 LAN alias -> RUTX50 5G IP
+              -> Port Forward (ext RADAR_PORT -> converter IP:port)
+              -> [this script on MEC connects OUT as a TCP client]
 
 What this does:
-  1. Listens on TCP port 5000 for RUTX50 serial-over-IP connection
+  1. Dials OUT to the RS485-to-Ethernet converter (via RUTX50's 5G IP,
+     which port-forwards through to the converter's TCP Server socket)
   2. Decodes raw RS485 smartmicro frames (0x7E, CRC-16 CCITT)
   3. Decodes CAN messages: 0x0500, 0x0501, 0x0502..0x057F
   4. Classifies vehicles by length (per UMRR-11 firmware v4.3.2.1 spec)
@@ -27,13 +31,27 @@ Key fixes vs v1:
   - Thread-safe logger with a lock on CSV writes
   - Config validated at startup
 
-Usage:
-    python3 mec_radar_server_v2.py
+Changed vs v2 (USB-RS485 + RUTX50 Serial-Over-IP server version):
+  - Previously this script LISTENED on LISTEN_HOST:LISTEN_PORT for an
+    inbound connection from the RUTX50 (Serial Over IP, client mode),
+    which was itself fed by a USB-RS485 adapter plugged into the router.
+  - Now the radar is wired directly into a standalone RS485/Ethernet
+    converter (e.g. USR-TCP232-304). The converter stays in TCP Server
+    mode; this script DIALS OUT to it (through the RUTX50's port
+    forward) instead of listening for an inbound connection. No RUTX50
+    "Serial Over IP" client config is needed any more.
+  - Auto-reconnect loop: if the connection drops or the converter isn't
+    reachable yet, this retries every RECONNECT_DELAY_S seconds while
+    preserving detector/logger/TTRC-tracker state across reconnects.
 
-RUTX50 Serial Over IP must be set to:
-    Mode   : Client
-    Host   : <this MEC server IP>
-    Port   : 5000
+Usage:
+    python3 radar_data_ethernet.py
+
+RUTX50 must have a Port Forward configured:
+    External port RADAR_PORT (TCP)  ->  <converter LAN IP> : <converter port>
+Converter (e.g. 192.168.0.7) stays in:
+    Work Mode : TCP Server
+    Local Port: <converter port, e.g. 20108>
 """
 from collections import deque, defaultdict
 import math
@@ -53,8 +71,13 @@ latest_objects = []
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-LISTEN_HOST        = "0.0.0.0"
-LISTEN_PORT        = 5000           # Must match RUTX50 Serial Over IP port
+# RS485 -> Ethernet converter, reached through the RUTX50's port forward.
+# e.g. converter sits at 192.168.0.7:20108 on the RUTX50 LAN, and the
+# RUTX50 forwards its 5G-side RADAR_PORT to that converter address.
+RADAR_HOST         = "10.45.0.56"   # RUTX50's 5G/UE IP (update to your router's IP)
+RADAR_PORT         = 5000           # External port forwarded -> converter IP:port
+RECONNECT_DELAY_S  = 5.0            # Wait time between reconnect attempts
+SOCKET_TIMEOUT_S   = 30.0           # recv() timeout; triggers reconnect if exceeded
 
 LOG_DIR            = os.path.join(os.path.expanduser("~"), "mec_radar_logs")
 
@@ -78,7 +101,7 @@ MIN_SPEED_TTRC = 0.3       # m/s
 
 # Example conflict point in radar coordinates
 CONFLICT_POINTS = [
-    (20.0, 0.0),
+    (8.5, 0.0),
 ]
 
 # Display
@@ -100,6 +123,100 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("radar")
+
+
+# ==============================================================================
+# RADAR DETECTION CSV LOG  (camera_data.py style — single DictWriter file)
+# ==============================================================================
+# One row is written per in-zone object per sensor cycle, in the same style
+# as camera_tracks_*.csv from camera_data.py:
+#   - single file, csv.DictWriter, thread-safe, flushed on every write
+#   - wall_time column for correlating against the camera log / alerts CSV
+#   - gate_status column: "approved" the first cycle an obj_id is logged,
+#                         "tracking" for every cycle after that
+#
+# This is in addition to the existing hb_/objects_/pedestrians_ CSVs written
+# by DataLogger below; those are left untouched for anything already reading
+# them. This new file is the one to use if you want a single combined feed
+# that lines up with camera_tracks_*.csv column-for-column where possible.
+# ==============================================================================
+_RADAR_CSV_DIR = os.path.join(os.path.expanduser("~"), "mec_radar_logs")
+os.makedirs(_RADAR_CSV_DIR, exist_ok=True)
+
+_radar_session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+_RADAR_CSV_PATH   = os.path.join(_RADAR_CSV_DIR, f"radar_tracks_{_radar_session_ts}.csv")
+
+_RADAR_CSV_COLUMNS = [
+    "wall_time",     # real wall-clock time — correlate with camera_tracks_*.csv
+    "cycle",         # radar sensor cycle count (0x0501 cycle_count)
+    "dur_ms",        # cycle duration in ms, as reported by the sensor
+    "obj_id",        # radar track ID (0-255, reused over time)
+    "vehicle_class", # classify_vehicle(len_m) — Car/Bus/Pedestrian/etc.
+    "x_m",           # radar-frame x position (metres)
+    "y_m",           # radar-frame y position (metres)
+    "dist_m",        # radial distance from sensor (metres)
+    "spd_kmh",       # instantaneous speed
+    "hdg_deg",       # signed heading, degrees
+    "direction",     # APPROACHING / RECEDING
+    "len_m",         # estimated object length (metres)
+    "ttrc_s",        # seconds to conflict point; blank if not computable
+    "in_zone",       # 1 if inside MAX_DISTANCE_M / MAX_LATERAL_M zone, else 0
+    "is_pedestrian", # 1 if length band matches pedestrian, else 0
+    "gate_status",   # "approved" on first appearance, "tracking" after
+]
+
+_radar_csv_lock   = threading.Lock()
+_radar_csv_file   = open(_RADAR_CSV_PATH, "w", newline="", encoding="utf-8")
+_radar_csv_writer = csv.DictWriter(_radar_csv_file, fieldnames=_RADAR_CSV_COLUMNS)
+_radar_csv_writer.writeheader()
+_radar_csv_file.flush()
+print(f"[RADAR-CSV] Detection log -> {_RADAR_CSV_PATH}")
+
+# Tracks which obj_ids have already had a row written this session, so we can
+# set gate_status the same way camera_data.py does ("approved" vs "tracking").
+_radar_seen_obj_ids: set = set()
+
+
+def log_radar_track_row(obj: dict, cycle_num: int, dur_ms: int,
+                        rx_time: float, ttrc: Optional[float]) -> None:
+    """
+    Write one row to radar_tracks_*.csv for a single decoded object.
+    Mirrors the camera detection CSV log in camera_data.py.
+    """
+    oid = obj["id"]
+    is_new = oid not in _radar_seen_obj_ids
+    _radar_seen_obj_ids.add(oid)
+
+    with _radar_csv_lock:
+        _radar_csv_writer.writerow({
+            "wall_time":     datetime.fromtimestamp(rx_time).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "cycle":         cycle_num,
+            "dur_ms":        dur_ms,
+            "obj_id":        oid,
+            "vehicle_class": classify_vehicle(obj["len_m"]),
+            "x_m":           obj["x_m"],
+            "y_m":           obj["y_m"],
+            "dist_m":        obj["dist_m"],
+            "spd_kmh":       obj["spd_kmh"],
+            "hdg_deg":       obj["hdg_deg"],
+            "direction":     direction_str(obj["hdg_deg"]),
+            "len_m":         obj["len_m"],
+            "ttrc_s":        round(ttrc, 3) if ttrc is not None else "",
+            "in_zone":       1 if in_zone(obj) else 0,
+            "is_pedestrian": 1 if is_pedestrian(obj["len_m"]) else 0,
+            "gate_status":   "approved" if is_new else "tracking",
+        })
+        _radar_csv_file.flush()
+
+
+def close_radar_csv() -> None:
+    with _radar_csv_lock:
+        try:
+            _radar_csv_file.flush()
+            _radar_csv_file.close()
+        except Exception:
+            pass
+    print(f"[RADAR-CSV] Detection log closed -> {_RADAR_CSV_PATH}")
 
 
 # ==============================================================================
@@ -437,6 +554,8 @@ class TTRCTracker:
             return None
 
 
+        ttrc = None
+
         for cp_x, cp_y in CONFLICT_POINTS:
 
             dx_cp = cp_x - x_new
@@ -449,7 +568,10 @@ class TTRCTracker:
 
             dist_cp = math.hypot(dx_cp, dy_cp)
 
-            ttrc = dist_cp / speed
+            cp_ttrc = dist_cp / speed
+
+            if ttrc is None or cp_ttrc < ttrc:
+                ttrc = cp_ttrc
 
         if ttrc is not None:
             self.ttrc_per_id[oid] = round(ttrc, 3)
@@ -667,7 +789,7 @@ def handle_client(conn: socket.socket, addr: tuple,
     This matches the sensor's output pattern: 0x0500 → 0x0501 → 0x0502..0x05xx
     all in one RS485 frame per cycle.
     """
-    log.info(f"[TCP] RUTX50 connected from {addr[0]}:{addr[1]}")
+    log.info(f"[TCP] Radar converter link up ({addr[0]}:{addr[1]})")
 
     parser           = RS485FrameParser()
     pending_status   : Optional[dict] = None
@@ -732,6 +854,7 @@ def handle_client(conn: socket.socket, addr: tuple,
                       f"{direction}{ped_flag}{zone_tag}")
 
             logger.log_object(obj, cycle_num, rx_time,ttrc)
+            log_radar_track_row(obj, cycle_num, dur_ms, rx_time, ttrc)
 
         # Pedestrian detection (only in-zone candidates are processed inside)
         confirmed = ped_det.process(objects, rx_time)
@@ -766,7 +889,7 @@ def handle_client(conn: socket.socket, addr: tuple,
         while True:
             chunk = conn.recv(RECV_BUF)
             if not chunk:
-                log.info(f"[TCP] RUTX50 {addr[0]} disconnected (EOF).")
+                log.info(f"[TCP] Radar converter {addr[0]} disconnected (EOF).")
                 break
 
             for can_messages in parser.feed(chunk):
@@ -810,7 +933,7 @@ def handle_client(conn: socket.socket, addr: tuple,
             conn.close()
         except Exception:
             pass
-        log.info(f"[TCP] Connection from {addr[0]} closed. "
+        log.info(f"[TCP] Connection to {addr[0]} closed. "
                  f"cycles={cycles}  "
                  f"frames_ok={parser.frames_ok}  "
                  f"bad_crc={parser.frames_bad_crc}")
@@ -821,47 +944,51 @@ def handle_client(conn: socket.socket, addr: tuple,
 # ==============================================================================
 def main():
     print("=" * 65)
-    print("  UMRR-11 Radar  —  MEC Server  v2")
-    print(f"  Listening on  : {LISTEN_HOST}:{LISTEN_PORT}")
-    print(f"  Logs dir      : {LOG_DIR}")
-    print(f"  Zone          : dist<={MAX_DISTANCE_M}m  |y|<={MAX_LATERAL_M}m")
-    print(f"  Ped confirm   : {MIN_CONFIRM_CYCLES} cycles  "
+    print("  UMRR-11 Radar  —  MEC Client  v3 (RS485/Ethernet converter)")
+    print(f"  Dialing out to : {RADAR_HOST}:{RADAR_PORT}")
+    print(f"  Logs dir       : {LOG_DIR}")
+    print(f"  Zone           : dist<={MAX_DISTANCE_M}m  |y|<={MAX_LATERAL_M}m")
+    print(f"  Ped confirm    : {MIN_CONFIRM_CYCLES} cycles  "
           f"(timeout {TRACK_TIMEOUT_CYCLES} cycles)")
     print("=" * 65)
-    print("  Waiting for RUTX50 connection...")
-    print("  (RUTX50: Serial Over IP → Mode=Client, "
-          f"Host=<MEC IP>, Port={LISTEN_PORT})")
+    print("  Connecting to RUTX50 (port-forwarded to the RS485/Ethernet "
+          "converter)...")
+    print(f"  Reconnect every {RECONNECT_DELAY_S:.0f}s if the link drops.")
     print("=" * 65 + "\n")
 
-    ped_det = PedestrianDetector()
+    ped_det      = PedestrianDetector()
     ttrc_tracker = TTRCTracker()
-    logger  = DataLogger(LOG_DIR)
+    logger       = DataLogger(LOG_DIR)
 
     log.info(f"HB  log -> {logger.hb_path}")
     log.info(f"Obj log -> {logger.obj_path}")
     log.info(f"Ped log -> {logger.ped_path}")
-
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((LISTEN_HOST, LISTEN_PORT))
-    server.listen(5)
+    log.info(f"Radar tracks (camera-style) log -> {_RADAR_CSV_PATH}")
 
     try:
         while True:
+            conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            conn.settimeout(SOCKET_TIMEOUT_S)
             try:
-                conn, addr = server.accept()
-                conn.settimeout(30.0)
-                t = threading.Thread(
-                    target=handle_client,
-                    args=(conn, addr, ped_det, logger, ttrc_tracker),
-                    daemon=True,
-                    name=f"radar-{addr[0]}",
-                )
-                t.start()
+                conn.connect((RADAR_HOST, RADAR_PORT))
+                log.info(f"[TCP] Connected to radar converter via "
+                         f"{RADAR_HOST}:{RADAR_PORT}")
+                # handle_client() blocks here until disconnect/error,
+                # preserving ped_det/logger/ttrc_tracker state across reconnects.
+                handle_client(conn, (RADAR_HOST, RADAR_PORT),
+                              ped_det, logger, ttrc_tracker)
             except KeyboardInterrupt:
                 raise
-            except Exception as e:
-                log.error(f"[ERROR] Accept: {e}")
+            except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                log.warning(f"[TCP] Connect/IO failed: {e}. "
+                            f"Retrying in {RECONNECT_DELAY_S:.0f}s...")
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            time.sleep(RECONNECT_DELAY_S)
 
     except KeyboardInterrupt:
         print("\n[INFO] Stopped by user.")
@@ -869,9 +996,9 @@ def main():
         ped_det.print_histogram()
 
     finally:
-        server.close()
         logger.close()
-        log.info("Server closed. Logs saved.")
+        close_radar_csv()
+        log.info("Client stopped. Logs saved.")
 
 
 if __name__ == "__main__":
