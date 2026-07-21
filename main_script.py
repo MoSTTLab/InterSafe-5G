@@ -76,7 +76,7 @@ _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_PATH    = os.path.join(CSV_OUTPUT_DIR, f"alerts_{_session_ts}.csv")
 
 CSV_COLUMNS = ["timestamp", "source", "class", "object_id", "ttrc",
-               "ttrc_tier", "speed_kmh", "status", "direction", "alert_message"]
+               "ttrc_tier", "speed_kmh", "status", "direction", "move_dir", "alert_message"]
 
 # =============================================================================
 # CLI
@@ -107,7 +107,8 @@ def _ttrc_tier(label: str) -> str:
 # =============================================================================
 def _format_alert_message(label: str, track_id, ttrc_s: float,
                            ids_in_frame: list,
-                           body_lean: str | None = None) -> str:
+                           body_lean: str | None = None,
+                           move_dir: str = "") -> str:
     """
     Build the human-readable alert string for a single object.
 
@@ -140,9 +141,14 @@ def _format_alert_message(label: str, track_id, ttrc_s: float,
     # ── Single object alert ───────────────────────────────────────────────────
     msg = f"{label} ID:{track_id} AHEAD | {ttrc_str}"
 
-    # Body lean is only available for Pedestrians (from pose model)
-    if label == "Pedestrian" and body_lean and body_lean != "straight":
-        msg += f" | moving {body_lean}"
+    if label == "Pedestrian":
+        # Pedestrians: use pose body_lean (more accurate than px-based move_dir)
+        if body_lean and body_lean != "straight":
+            msg += f" | moving {body_lean}"
+    else:
+        # Vehicles: use px-based lateral direction
+        if move_dir and move_dir != "straight":
+            msg += f" | moving {move_dir}"
 
     return msg
 # =============================================================================
@@ -152,8 +158,9 @@ def _format_alert_message(label: str, track_id, ttrc_s: float,
 def emit_alert(source: str, label: str, object_id: int,
                ttrc: float, speed_kmh: float,
                direction: str = "", timestamp: float | None = None,
-               ped_ids_in_frame: list | None = None,
-               body_lean: str | None = None) -> None:
+               ids_in_frame: list | None = None,
+               body_lean: str | None = None,
+               move_dir: str = "") -> None:
     """
     Build the alert payload, print to terminal, and hand off to
     alert_dispatcher.send() for delivery to VMS + phone.
@@ -169,7 +176,7 @@ def emit_alert(source: str, label: str, object_id: int,
         timestamp = time.time()
 
     alert_message = _format_alert_message(
-        label, object_id, ttrc, ped_ids_in_frame, body_lean
+        label, object_id, ttrc, ids_in_frame, body_lean, move_dir
     )
 
     alert = {
@@ -182,9 +189,10 @@ def emit_alert(source: str, label: str, object_id: int,
         "speed_kmh":        round(speed_kmh, 1),
         "status":           status,
         "direction":        direction,
+        "move_dir":         move_dir,
         "timestamp":        timestamp,
         "alert_message":    alert_message,
-        "ped_ids_in_frame": ids_in_frame,  # forwarded to dispatcher for VMS grouping
+        "ids_in_frame": ids_in_frame,  # forwarded to dispatcher for VMS grouping
     }
 
     # ── CSV log ──────────────────────────────────────────────────────────────
@@ -199,6 +207,7 @@ def emit_alert(source: str, label: str, object_id: int,
             "speed_kmh":     round(speed_kmh, 1),
             "status":        status,
             "direction":     direction,
+            "move_dir":      move_dir,
             "alert_message": alert_message,
         })
         _csv_file.flush()
@@ -227,7 +236,6 @@ def emit_alert(source: str, label: str, object_id: int,
 
 _radar_alerted: set = set()
 
-
 def process_radar():
     objects = radar_data.latest_objects
     if not objects:
@@ -252,7 +260,7 @@ def process_radar():
 
         if oid not in _radar_alerted:
             _radar_alerted.add(oid)
-            same_class_ids = [o["id"] for o in objects if o.get("class") == "Pedestrian"]
+            same_class_ids = [o["id"] for o in objects if o.get("class") == label]
             emit_alert(
                 source           = "RADAR",
                 label            = label,
@@ -292,6 +300,8 @@ def process_camera():
         oid       = obj.get("obj_id",     -1)
         frame_no  = obj.get("frame_no",    0)
         speed_kmh = obj.get("speed_km_h", obj.get("speed_m_s", 0.0) * 3.6)
+        move_dir  = obj.get("move_dir",   "")
+        direction = obj.get("direction", "")
         body_lean = obj.get("body_lean",   None)
         timestamp = obj.get("timestamp")
         threshold = _ttrc_threshold(label)
@@ -306,16 +316,17 @@ def process_camera():
 
         if oid not in _camera_alerted:
             _camera_alerted.add(oid)
-            same_class_ids = [it.get("obj_id", -1) for it in items if it.get("label") == "Pedestrian"]
+            same_class_ids = [it.get("obj_id", -1) for it in items if it.get("label") == label]
             emit_alert(
                 source           = "CAMERA",
                 label            = label,
                 object_id        = oid,
                 ttrc             = ttrc,
                 speed_kmh        = speed_kmh,
-                direction        = "",
+                direction        = direction,
+                move_dir         = move_dir,
                 timestamp        = timestamp,
-                ped_ids_in_frame = same_class_ids,
+                ids_in_frame = same_class_ids,
                 body_lean        = body_lean,
             )
 

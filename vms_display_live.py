@@ -81,7 +81,7 @@ ACK_ER        = b"#ER*"
 PACKET_FORMAT = "<IIIII"      # 5 x uint32 little-endian = 20 bytes
 
 # ── IP / Port constants ───────────────────────────────────────────────────────
-GATEWAY_WAN_IP  = "10.45.0.56"    # gateway (CPE/RUT or similar WAN/cellular IP — reachable from MEC over 5G
+GATEWAY_WAN_IP  = "10.45.0.68"    # gateway (CPE/RUT or similar WAN/cellular IP — reachable from MEC over 5G
 GATEWAY_LAN_IP  = "192.168.1.1"   # gateway (CPE/RUT or similar LAN gateway          (reference only)
 VMS_BOARD_LAN_IP = "192.168.1.75"  # VMS board LAN IP         (NOT reachable from MEC)
 UFD_PORT         = 5000            # UFD TCP port on VMS board (same on gateway (CPE/RUT or similar forward)

@@ -66,10 +66,10 @@ from ultralytics import YOLO
 # =============================================================================
 # CONFIGURATIONS - PATHS 
 # =============================================================================
-MODEL_PATH      = ""
-POSE_MODEL_PATH = ""
-HOMOGRAPHY_JSON = ""
-RTSP_URL        = "" 
+MODEL_PATH      = "/home/test/Downloads/yolov8_final.pt"
+POSE_MODEL_PATH = "/home/test/Downloads/yolov8n-pose.pt"
+HOMOGRAPHY_JSON = "/home/test/intercept/New/homography_13july.json"
+RTSP_URL        = "rtsp://admin:admin123@10.45.0.64:554/avstream/channel=1/stream=0.sdp" 
 
 # =============================================================================
 # CONFIGURATIONS - CONSTANTS
@@ -168,7 +168,7 @@ _stop_event = threading.Event()
 # =============================================================================
 # CAMERA DETECTION CSV LOG
 # =============================================================================
-_CAM_CSV_DIR = "/home/coewwt/Videos/intersafe_recordings"
+_CAM_CSV_DIR = "/home/test/intercept/16July2026"
 os.makedirs(_CAM_CSV_DIR, exist_ok=True)
 
 _cam_session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -188,6 +188,7 @@ _CAM_CSV_COLUMNS = [
     "speed_km_h",    # instantaneous speed
     "bearing_deg",   # compass bearing in degrees (blank if stationary)
     "direction",     # human-readable reduced bearing e.g. "NE"
+    "move_dir",      # lateral direction: left/right/straight
     "latitude",      # GPS latitude
     "longitude",     # GPS longitude
     "ttrc_s",        # seconds to conflict point; blank if not heading toward CP
@@ -317,7 +318,29 @@ def run_pose_on_pedestrian(frame, x1, y1, x2, y2, frame_w, frame_h, pose_model):
 
 
 def classify_pedestrian_activity(kp_xy, kp_conf):
-    """Returns (activity, body_lean)."""
+    """Returns (activity, body_lean).
+
+    body_lean reflects the direction the pedestrian is physically moving,
+    not just torso sway.  We use two signals and take the stronger one:
+
+    Signal A — ankle asymmetry (leading foot):
+        When walking left or right, one foot leads the other.  The leading
+        ankle has a lower y (higher in the frame from the camera's elevated
+        perspective, but lower in pixel y if the person is walking up-screen,
+        or can be unreliable from top-down views).  We therefore use LATERAL
+        (x-axis) ankle separation relative to hip centre instead.
+
+    Signal B — shoulder x-velocity proxy:
+        If both shoulders are visible over two consecutive pose calls, their
+        net x-displacement tells us the body is drifting left or right.
+        This is the most reliable indicator for side-to-side walking from an
+        elevated/overhead camera because it doesn't depend on which foot leads.
+
+    For top-down / elevated cameras, side-to-side walkers keep their torso
+    nearly vertical so shoulder-hip x-offset (the old signal) is always ~0,
+    causing "straight" even when clearly walking sideways.  The ankle lateral
+    spread + hip-centre displacement is a much better signal for this geometry.
+    """
     def kp(idx): return _get_kp(kp_xy, kp_conf, idx)
 
     l_shldr = kp(KP_LEFT_SHLDR);  r_shldr = kp(KP_RIGHT_SHLDR)
@@ -331,6 +354,7 @@ def classify_pedestrian_activity(kp_xy, kp_conf):
     if not torso_h or torso_h < 10:
         return "unknown", "straight"
 
+    # ── Activity classification (unchanged) ───────────────────────────────────
     knee_lifts = [max(hip[1] - knee[1], 0)
                   for hip, knee in [(l_hip, l_knee), (r_hip, r_knee)]
                   if hip and knee]
@@ -345,17 +369,56 @@ def classify_pedestrian_activity(kp_xy, kp_conf):
     elif ankle_spread < 0.40:  activity = "standing"
     else:                      activity = "walking"
 
-    shldr_mid_x = ((l_shldr[0]+r_shldr[0])/2 if (l_shldr and r_shldr)
-                   else (l_shldr[0] if l_shldr else (r_shldr[0] if r_shldr else None)))
-    hip_mid_x   = ((l_hip[0]+r_hip[0])/2 if (l_hip and r_hip)
-                   else (l_hip[0] if l_hip else (r_hip[0] if r_hip else None)))
+    # ── Body lean / lateral movement direction ────────────────────────────────
+    # Use hip-centre x as reference.  Compare each ankle's x to hip centre.
+    # The ankle that is further from hip centre in x is the "leading" lateral
+    # foot, which tells us which way the person is moving sideways.
+    hip_mid_x = None
+    if l_hip and r_hip:
+        hip_mid_x = (l_hip[0] + r_hip[0]) / 2.0
+    elif l_hip:
+        hip_mid_x = l_hip[0]
+    elif r_hip:
+        hip_mid_x = r_hip[0]
 
     body_lean = "straight"
-    if shldr_mid_x is not None and hip_mid_x is not None:
-        torso_w      = max(abs(l_shldr[0]-r_shldr[0]), 1.0) if (l_shldr and r_shldr) else 1.0
-        offset_ratio = (shldr_mid_x - hip_mid_x) / torso_w
-        if offset_ratio < -0.15:  body_lean = "left"
-        elif offset_ratio > 0.15: body_lean = "right"
+
+    if hip_mid_x is not None and l_ankle and r_ankle:
+        hip_w = max(abs(l_hip[0]-r_hip[0]), 1.0) if (l_hip and r_hip) else 1.0
+
+        # Lateral offset of each ankle from hip centre, normalised by hip width
+        l_offset = (l_ankle[0] - hip_mid_x) / hip_w
+        r_offset = (r_ankle[0] - hip_mid_x) / hip_w
+
+        # The ankle with the larger absolute lateral offset is the leading foot.
+        # Its direction relative to hip centre tells us which way they're moving.
+        LEAN_THRESHOLD = 0.20   # normalised units; raise if too sensitive
+
+        if abs(l_offset) >= abs(r_offset):
+            dominant_offset = l_offset
+        else:
+            dominant_offset = r_offset
+
+        if dominant_offset < -LEAN_THRESHOLD:
+            body_lean = "left"
+        elif dominant_offset > LEAN_THRESHOLD:
+            body_lean = "right"
+
+    elif hip_mid_x is not None:
+        # Only one ankle visible — fall back to shoulder-hip torso sway
+        shldr_mid_x = None
+        if l_shldr and r_shldr:
+            shldr_mid_x = (l_shldr[0] + r_shldr[0]) / 2.0
+        elif l_shldr:
+            shldr_mid_x = l_shldr[0]
+        elif r_shldr:
+            shldr_mid_x = r_shldr[0]
+
+        if shldr_mid_x is not None:
+            torso_w      = max(abs(l_shldr[0]-r_shldr[0]), 1.0) if (l_shldr and r_shldr) else 1.0
+            offset_ratio = (shldr_mid_x - hip_mid_x) / torso_w
+            if offset_ratio < -0.15:  body_lean = "left"
+            elif offset_ratio > 0.15: body_lean = "right"
 
     return activity, body_lean
 
@@ -440,6 +503,31 @@ def get_heading(py_history, min_py_delta: int = 6) -> str:
     if py_delta <= -min_py_delta:
         return "away"
     return "unknown"
+
+def get_lateral_direction(px_history, min_px_delta: int = 10) -> str:
+    """
+    Classify lateral movement direction from foot-point x history.
+
+    px_history  : sequence of px values oldest → newest
+    min_px_delta: minimum net horizontal pixel movement to call a direction.
+                  Higher = less sensitive to jitter.
+                  Recommended: 10–15px for vehicles, 6–8px for pedestrians.
+
+    Returns:
+        "right"    — net rightward movement  (px increasing)
+        "left"     — net leftward movement   (px decreasing)
+        "straight" — within jitter band or insufficient samples
+    """
+    if len(px_history) < 2:
+        return "straight"
+
+    px_delta = px_history[-1] - px_history[0]
+
+    if px_delta >= +min_px_delta:
+        return "right"
+    if px_delta <= -min_px_delta:
+        return "left"
+    return "straight"
 
 # =============================================================================
 # MODEL DEVICE PLACEMENT
@@ -537,26 +625,32 @@ def _pipeline_loop():
     approved_ids = set()
 
     # ── ROI gate state ─────────────────────────────────────────────────────────
-    # Simple two-step rule:
-    #   1. Is the object's foot point inside the ROI right now?
-    #        No  → not tracked at all, nothing recorded.
-    #   2. If yes, is it heading toward the camera or away from it?
-    #        Away  → not detected/tracked.
-    #        Toward → approved: tracked and drawn from here on, and stays
-    #                 approved even after it later leaves the ROI.
+    # Strict continuous rule — re-evaluated every frame for every object:
+    #   1. Foot point must be inside the ROI right now.
+    #        No  → immediately cleared and skipped; if previously approved,
+    #              approval is revoked and history is wiped.
+    #   2. py must be net-increasing over ROI_HEADING_WINDOW frames
+    #      (moving lower in frame = toward the camera).
+    #        "away" or "unknown" (horizontal/jitter) → not tracked;
+    #              if previously approved, de-approved immediately.
+    #        "toward" → approved (or stays approved) and tracked.
     #
-    # "Heading" is judged from the foot point's vertical pixel movement (py)
-    # while inside the ROI and not yet approved: increasing py = getting
-    # lower in frame = moving toward the camera; decreasing py = moving away.
-    # A small window + threshold avoids single-frame detection jitter being
-    # mistaken for real movement.
+    # There is NO permanent approval — direction is checked every frame.
+    # An object that enters the ROI heading toward camera, then turns and
+    # walks away, is de-approved the same frame its py starts decreasing.
     ROI_HEADING_WINDOW = 5   # frames of py history to judge heading, while inside ROI
-    ROI_MIN_PY_DELTA    = 6  # pixels, net vertical movement needed to call it a direction
+    ROI_MIN_PY_DELTA    = 6  # px net vertical movement needed to call it a direction
 
     # roi_heading_hist: obj_id → deque of py samples, collected only while the
     # object is inside the ROI and not yet approved. Cleared once approved or
     # once the object leaves the ROI before a direction was ever confirmed.
     roi_heading_hist: dict[int, deque] = {}
+
+    # In pipeline state setup (alongside roi_heading_hist)
+    px_hist: dict[int, deque] = {}   # obj_id → deque of recent px values
+    PX_HISTORY_WINDOW  = 8    # frames — longer window than py for smoother lateral read
+    PX_MIN_DELTA_VEH   = 12   # pixels — larger threshold for vehicles (bigger bboxes)
+    PX_MIN_DELTA_PED   = 7    # pixels — smaller for pedestrians (complement to pose)
 
     # Pose state
     pose_cache         = {}               # obj_id → {activity, body_lean, move_dir, kp_xy, kp_conf}
@@ -571,6 +665,8 @@ def _pipeline_loop():
     # ── Main capture + detection loop ─────────────────────────────────────────
     while not _stop_event.is_set():
 
+        # With FRAME_SKIP=1 every frame is processed — cap.read() already
+        # advances the buffer, so a separate grab() is not needed but adding to resolve the issues
         cap.grab()
         ret, frame = cap.read()
 
@@ -591,6 +687,7 @@ def _pipeline_loop():
             roi_heading_hist.clear()
             history.clear()
             pos_smooth.clear()
+            px_hist.clear()
             pose_cache.clear()
             pose_frame_counter.clear()
             pose_confirmed_ids.clear()
@@ -627,42 +724,74 @@ def _pipeline_loop():
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 px, py          = int((x1+x2)/2), y2   # foot point
 
-                # ── ROI gate  (inside ROI, then heading check) ────────────────
+                # ── ROI gate  (strict continuous py check) ───────────────────
                 #
-                # Step 1: is the foot point inside the ROI right now?
-                # Step 2: if yes and not yet approved, is it heading toward
-                #         the camera (py increasing) or away (py decreasing)?
-                # Once approved, an object stays approved and keeps being
-                # tracked even after it later leaves the ROI.
+                # RULE: an object is tracked ONLY while ALL of the following
+                # are simultaneously true every frame:
+                #   1. Foot point is inside the ROI
+                #   2. py is net-increasing over ROI_HEADING_WINDOW frames
+                #      (moving toward the camera / lower in frame)
+                #
+                # "unknown" (horizontal movement, jitter, or not enough samples)
+                # and "away" (py decreasing) both result in the object being
+                # moved back to pending/untracked immediately.  There is no
+                # permanent approval — the heading is re-evaluated every frame.
+                #
+                # This directly handles all three failure cases:
+                #   A) Person approaches ROI but turns back before entering:
+                #      never inside ROI → never evaluated → never tracked.
+                #   B) Person enters ROI heading toward camera → approved.
+                #      Then turns and walks away → py decreases → de-approved
+                #      the same frame the direction reverses.
+                #   C) Stream issue: object enters ROI mid-stream, py is
+                #      decreasing (walking away) → rejected immediately even
+                #      if first seen inside ROI.
+                #   D) Horizontal movement (py constant): treated as pending,
+                #      never approved, never tracked.
 
                 inside_roi = (ROI1 is not None and
                               cv2.pointPolygonTest(ROI1, (float(px), float(py)), False) >= 0)
 
-                if obj_id not in approved_ids:
-
-                    if not inside_roi:
-                        # Not inside the ROI — nothing to evaluate or track yet.
+                # Outside ROI — clear any stale history and skip entirely.
+                if not inside_roi:
+                    if obj_id in approved_ids:
+                        approved_ids.discard(obj_id)
                         roi_heading_hist.pop(obj_id, None)
-                        continue
-
-                    # Inside the ROI — build a short py history to judge heading.
-                    hist_py = roi_heading_hist.setdefault(
-                        obj_id, deque(maxlen=ROI_HEADING_WINDOW))
-                    hist_py.append(py)
-
-                    heading = get_heading(hist_py, ROI_MIN_PY_DELTA)
-
-                    if heading == "toward":
-                        approved_ids.add(obj_id)
-                        _newly_approved.add(obj_id)
-                        roi_heading_hist.pop(obj_id, None)
-                        print(f"[CAM] ID:{obj_id} approved — inside ROI, "
-                              f"heading toward camera")
+                        history[obj_id].clear()
+                        pos_smooth[obj_id] = None
                     else:
-                        # "away"    → clearly leaving the camera, not a hazard.
-                        # "unknown" → not enough samples / within jitter band.
-                        # Either way: not yet approved, keep/skip for now.
-                        continue
+                        roi_heading_hist.pop(obj_id, None)
+                    continue
+
+                # Inside ROI — always update heading history.
+                hist_py = roi_heading_hist.setdefault(
+                    obj_id, deque(maxlen=ROI_HEADING_WINDOW))
+                hist_py.append(py)
+                heading = get_heading(hist_py, ROI_MIN_PY_DELTA)
+
+                if heading != "toward":
+                    if obj_id in approved_ids:
+                        approved_ids.discard(obj_id)
+                        history[obj_id].clear()
+                        pos_smooth[obj_id] = None
+                        px_hist.pop(obj_id, None)      # ← add here
+                        print(f"[CAM] ID:{obj_id} de-approved — "
+                            f"heading={heading} (py not increasing)")
+                    continue
+
+                # heading == "toward": approve (or keep approved) and track.
+                if obj_id not in approved_ids:
+                    approved_ids.add(obj_id)
+                    _newly_approved.add(obj_id)
+                    print(f"[CAM] ID:{obj_id} approved — inside ROI, "
+                          f"heading toward camera")
+                
+                # ── Lateral direction (all classes) ──────────────────────────────────
+                px_deque = px_hist.setdefault(obj_id, deque(maxlen=PX_HISTORY_WINDOW))
+                px_deque.append(px)
+
+                min_delta = PX_MIN_DELTA_PED if label == "Pedestrian" else PX_MIN_DELTA_VEH
+                lateral_dir = get_lateral_direction(px_deque, min_delta)
 
                 # ── Homography → world coords ─────────────────────────────────
                 world = pixel_to_world(px, py, H)
@@ -705,7 +834,7 @@ def _pipeline_loop():
                     result = compute_ttrc(X, Y, dx, dy, speed_m_s, conflict_points)
                     if result is not None:
                         ttrc = round(result["TTRC"], 3)
-                
+                        
                 # ── Pose estimation (Pedestrian only) ─────────────────────────
                 activity  = ""
                 body_lean = ""
@@ -763,7 +892,10 @@ def _pipeline_loop():
                     # pose (empty strings / None for non-pedestrians)
                     "activity":   activity,
                     "body_lean":  body_lean,
-                    "move_dir":   move_dir,
+                    # move_dir: lateral direction signal
+                    # Pedestrians → pose-based (classify_pedestrian_move_direction)
+                    # Vehicles    → px-history-based (get_lateral_direction)
+                    "move_dir": move_dir if label == "Pedestrian" else lateral_dir,
                     "kp_xy":      kp_xy,
                     "kp_conf":    kp_conf,
                     # TTRC — None if object not heading toward any conflict point
@@ -789,6 +921,7 @@ def _pipeline_loop():
                         "label":        label,
                         "conf":         round(conf, 3),
                         "foot_px_x":    px,
+                        "move_dir":     move_dir if label != "Pedestrian" else body_lean,
                         "foot_px_y":    py,
                         "X_world_m":    round(X, 3),
                         "Y_world_m":    round(Y, 3),

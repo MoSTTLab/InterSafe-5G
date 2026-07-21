@@ -33,6 +33,7 @@ from vms_display_live import UFDBoard, UFD_TARGET_IP, UFD_TARGET_PORT
 COAP_SERVER_HOST = "127.0.0.1"
 COAP_PORT              = 5683
 VMS_ALERT_DURATION_SEC = 3.0    # how long VMS shows the alert before reverting
+GROUP_ALERT_COUNT      = 2 
 
 # =============================================================================
 # VMS BOARD  (one shared instance)
@@ -41,32 +42,50 @@ VMS_ALERT_DURATION_SEC = 3.0    # how long VMS shows the alert before reverting
 _vms_board: UFDBoard = UFDBoard(UFD_TARGET_IP, UFD_TARGET_PORT)
 
 def _vms_lines_for(label: str, track_id, source: str,
-                   ped_ids_in_frame: list) -> tuple[str, str]:
-    """Map alert label → two VMS display lines (≤12 chars each for readability)."""
+                   ids_in_frame: list) -> tuple[str, str]:
+    """
+    Map alert label → two VMS display lines (≤12 chars each for readability).
+    If more than GROUP_ALERT_COUNT objects of the same class are in frame,
+    the first line switches to the plural form for all classes.
+    """
     tag = "C" if source.upper() == "CAMERA" else "R"
 
-    mapping = {
-        "Pedestrian":    ("PEDESTRIAN",  f"AHEAD {tag}"),
-        "Bicycle":       ("BICYCLE",     f"AHEAD {tag}"),
-        "Two-wheeler":   ("TWO WHEELER", f"AHEAD {tag}"),
-        "Three-wheeler": ("THREE WHEEL", f"AHEAD {tag}"),
-        "Car":           ("CAR",         f"AHEAD {tag}"),
-        "Tempo-traveler": ("TEMPO TRAVELLER", f"AHEAD {tag}"),
-        "Bus":           ("BUS",         f"AHEAD {tag}"),
-        "Heavy Vehicle": ("HEAVY VEH",   f"AHEAD {tag}"),
+    # Single-object VMS lines per class
+    single = {
+        "Pedestrian":     ("PEDESTRIAN",  f"AHEAD {tag}"),
+        "Bicycle":        ("BICYCLE",     f"AHEAD {tag}"),
+        "Two-wheeler":    ("TWO WHEELER", f"AHEAD {tag}"),
+        "Three-wheeler":  ("THREE WHEEL", f"AHEAD {tag}"),
+        "Car":            ("CAR",         f"AHEAD {tag}"),
+        "Tempo-traveller":("TEMPO TRVLR", f"AHEAD {tag}"),
+        "Bus":            ("BUS",         f"AHEAD {tag}"),
+        "Heavy Vehicle":  ("HEAVY VEH",   f"AHEAD {tag}"),
     }
 
-    if label == "Pedestrian" and len(ped_ids_in_frame) > 2:
-        return "PEDESTRIANS", f"AHEAD {tag}"
+    # Group VMS lines per class (used when > GROUP_ALERT_COUNT in frame)
+    group = {
+        "Pedestrian":     ("PEDESTRIANS", f"AHEAD {tag}"),
+        "Bicycle":        ("BICYCLES",    f"AHEAD {tag}"),
+        "Two-wheeler":    ("TWO WHEELERS",f"AHEAD {tag}"),
+        "Three-wheeler":  ("3-WHEELERS",  f"AHEAD {tag}"),
+        "Car":            ("CARS",        f"AHEAD {tag}"),
+        "Tempo-traveller":("TEMPO TRVLRS",f"AHEAD {tag}"),
+        "Bus":            ("BUSES",       f"AHEAD {tag}"),
+        "Heavy Vehicle":  ("HEAVY VEHS",  f"AHEAD {tag}"),
+    }
 
-    line1, line2 = mapping.get(label, (label.upper()[:12], f"AHEAD {tag}"))
+    if len(ids_in_frame) > GROUP_ALERT_COUNT:
+        line1, line2 = group.get(label, (label.upper()[:12] + "S", f"AHEAD {tag}"))
+    else:
+        line1, line2 = single.get(label, (label.upper()[:12], f"AHEAD {tag}"))
+
     return line1, line2
 
 _vms_lock = threading.Lock()
 def _trigger_vms(label: str, track_id, source: str,
-                 ped_ids_in_frame: list) -> None:
+                 ids_in_frame: list) -> None:
 
-    line1, line2 = _vms_lines_for(label, track_id, source, ped_ids_in_frame)
+    line1, line2 = _vms_lines_for(label, track_id, source, ids_in_frame)
 
     def _run():
         print(f"[VMS] Static → '{line1} / {line2}'  ({VMS_ALERT_DURATION_SEC}s)")
@@ -152,18 +171,18 @@ def send(alert: dict) -> None:
     alert dict keys expected (all produced by main_script.emit_alert):
         type, source, class, object_id, ttrc, ttrc_tier,
         speed_kmh, status, direction, timestamp, alert_message,
-        ped_ids_in_frame   (optional list of pedestrian IDs for group detection)
+        ids_in_frame   (IDs of all objects of the same class)
     """
     label            = alert.get("class",            "Unknown")
     object_id        = alert.get("object_id",        -1)
     source           = alert.get("source",           "unknown")
-    ped_ids          = alert.get("ped_ids_in_frame", [])
+    ids_in_frame          = alert.get("ids_in_frame", [])
 
     # ── Phone ─────────────────────────────────────────────────────────────────
     _post_to_phone(alert)
 
     # ── VMS ───────────────────────────────────────────────────────────────────
-    _trigger_vms(label, object_id, source, ped_ids)
+    _trigger_vms(label, object_id, source, ids_in_frame)
 
 
 def shutdown() -> None:
