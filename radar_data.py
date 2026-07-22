@@ -155,7 +155,7 @@ _RADAR_CSV_COLUMNS = [
     "x_m",           # radar-frame x position (metres)
     "y_m",           # radar-frame y position (metres)
     "dist_m",        # radial distance from sensor (metres)
-    "spd_kmh",       # instantaneous speed
+    "speed_kmh",       # instantaneous speed
     "hdg_deg",       # signed heading, degrees
     "direction",     # APPROACHING / RECEDING
     "len_m",         # estimated object length (metres)
@@ -197,7 +197,7 @@ def log_radar_track_row(obj: dict, cycle_num: int, dur_ms: int,
             "x_m":           obj["x_m"],
             "y_m":           obj["y_m"],
             "dist_m":        obj["dist_m"],
-            "spd_kmh":       obj["spd_kmh"],
+            "speed_kmh":       obj["speed_kmh"],
             "hdg_deg":       obj["hdg_deg"],
             "direction":     direction_str(obj["hdg_deg"]),
             "len_m":         obj["len_m"],
@@ -417,7 +417,7 @@ def decode_object_data(can_id: int, data: bytes) -> Optional[dict]:
         "y_m"    : round(y_m,    3),
         "dist_m" : round(dist_m, 3),
         "spd_mps": round(spd_mps, 3),
-        "spd_kmh": round(spd_mps * 3.6, 2),
+        "speed_kmh": round(spd_mps * 3.6, 2),
         "hdg_deg": round(hdg_deg, 2),
         "len_m"  : round(len_m,  1),
         "len_raw": length_raw,
@@ -617,7 +617,7 @@ class PedestrianDetector:
                 "id": o["id"],
                 "x": o["x_m"],
                 "y": o["y_m"],
-                "speed": o["spd_kmh"],
+                "speed": o["speed_kmh"],
                 "heading": o["hdg_deg"],
                 "len_m": o["len_m"],
                 "class": classify_for_tester(o["len_m"]),  # class label computed here, not in tester_final.py
@@ -713,7 +713,7 @@ class DataLogger:
             'y_m',
             'dist_m',
             'spd_mps',
-            'spd_kmh',
+            'speed_kmh',
             'hdg_deg',
             'direction',
             'len_m',
@@ -724,7 +724,7 @@ class DataLogger:
         self._ped_w.writerow([
             'rx_time', 'cycle', 'object_id',
             'x_m', 'y_m', 'dist_m',
-            'spd_mps', 'spd_kmh',
+            'spd_mps', 'speed_kmh',
             'hdg_deg', 'direction',
             'len_m', 'len_raw'
         ])
@@ -743,7 +743,7 @@ class DataLogger:
                 f"{rx_time:.3f}", cycle, obj['id'],
                 classify_vehicle(obj['len_m']),
                 f"{obj['x_m']:.3f}", f"{obj['y_m']:.3f}", f"{obj['dist_m']:.3f}",
-                f"{obj['spd_mps']:.3f}", f"{obj['spd_kmh']:.2f}",
+                f"{obj['spd_mps']:.3f}", f"{obj['speed_kmh']:.2f}",
                 f"{obj['hdg_deg']:.2f}", direction_str(obj['hdg_deg']),
                 f"{obj['len_m']:.1f}", obj['len_raw'],
                 1 if in_zone(obj) else 0 , ttrc
@@ -755,7 +755,7 @@ class DataLogger:
             self._ped_w.writerow([
                 f"{rx_time:.3f}", cycle, obj['id'],
                 f"{obj['x_m']:.3f}", f"{obj['y_m']:.3f}", f"{obj['dist_m']:.3f}",
-                f"{obj['spd_mps']:.3f}", f"{obj['spd_kmh']:.2f}",
+                f"{obj['spd_mps']:.3f}", f"{obj['speed_kmh']:.2f}",
                 f"{obj['hdg_deg']:.2f}", direction_str(obj['hdg_deg']),
                 f"{obj['len_m']:.1f}", obj['len_raw']
             ])
@@ -848,7 +848,7 @@ def handle_client(conn: socket.socket, addr: tuple,
                       f"dist={obj['dist_m']:6.1f}m "
                       f"x={obj['x_m']:7.2f}m "
                       f"y={obj['y_m']:6.2f}m "
-                      f"spd={obj['spd_kmh']:5.1f}km/h "
+                      f"spd={obj['speed_kmh']:5.1f}km/h "
                       f"hdg={obj['hdg_deg']:6.1f}° "
                       f"len={obj['len_m']:.1f}m(r={obj['len_raw']:3d}) "
                       f"{direction}{ped_flag}{zone_tag}")
@@ -864,7 +864,7 @@ def handle_client(conn: socket.socket, addr: tuple,
             print(f"     Track ID  : {ped['id']}")
             print(f"     Distance  : {ped['dist_m']:.1f} m")
             print(f"     Position  : x={ped['x_m']:.2f} m   y={ped['y_m']:.2f} m")
-            print(f"     Speed     : {ped['spd_kmh']:.1f} km/h")
+            print(f"     Speed     : {ped['speed_kmh']:.1f} km/h")
             print(f"     Direction : {direction}")
             print(f"     Heading   : {ped['hdg_deg']:.1f}°")
             print(f"     Length    : {ped['len_m']:.1f} m  (raw={ped['len_raw']})")

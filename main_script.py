@@ -75,7 +75,7 @@ os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
 _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 CSV_PATH    = os.path.join(CSV_OUTPUT_DIR, f"alerts_{_session_ts}.csv")
 
-CSV_COLUMNS = ["timestamp", "source", "class", "object_id", "ttrc",
+CSV_COLUMNS = ["timestamp", "source", "class", "obj_id", "ttrc",
                "ttrc_tier", "speed_kmh", "status", "direction", "move_dir", "alert_message"]
 
 # =============================================================================
@@ -133,10 +133,11 @@ def _format_alert_message(label: str, track_id, ttrc_s: float,
             "Two-wheeler":   "Two-wheelers",
             "Three-wheeler": "Three-wheelers",
             "Car":           "Cars",
+            "Tempo-Traveller":"Tempo-Travellers",
             "Bus":           "Buses",
             "Heavy Vehicle": "Heavy Vehicles",
         }.get(label, f"{label}s")
-        return f"Multiple {plural} AHEAD | {ttrc_str}"
+        return f"{plural} AHEAD | {ttrc_str}"
 
     # ── Single object alert ───────────────────────────────────────────────────
     msg = f"{label} ID:{track_id} AHEAD | {ttrc_str}"
@@ -147,9 +148,13 @@ def _format_alert_message(label: str, track_id, ttrc_s: float,
             msg += f" | moving {body_lean}"
     else:
         # Vehicles: use px-based lateral direction
+        msg += f" | moving {move_dir}"
+    """        
+    else:
+        # Vehicles: use px-based lateral direction
         if move_dir and move_dir != "straight":
             msg += f" | moving {move_dir}"
-
+    """
     return msg
 # =============================================================================
 # EMIT ALERT  (build dict, print, hand off to dispatcher)
@@ -198,10 +203,10 @@ def emit_alert(source: str, label: str, object_id: int,
     # ── CSV log ──────────────────────────────────────────────────────────────
     with _csv_lock:
         _csv_writer.writerow({
-            "timestamp":     datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "wall_time":     datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
             "source":        source,
             "class":         label,
-            "object_id":     object_id,
+            "obj_id":        object_id,
             "ttrc":          round(ttrc, 2),
             "ttrc_tier":     tier,
             "speed_kmh":     round(speed_kmh, 1),
@@ -216,7 +221,7 @@ def emit_alert(source: str, label: str, object_id: int,
     print("\n" + "=" * 52)
     print(f"  ⚠️   CONFLICT ALERT  [{source}]")
     print("=" * 52)
-    print(f"  Object ID  : {object_id}")
+    print(f"  Obj ID     : {object_id}")
     print(f"  Class      : {label}")
     print(f"  Message    : {alert_message}")
     print(f"  TTRC       : {ttrc:.2f}s  [{tier}]  (threshold {_ttrc_threshold(label):.0f}s)")
@@ -299,7 +304,7 @@ def process_camera():
         label     = obj.get("label",      "Unknown")
         oid       = obj.get("obj_id",     -1)
         frame_no  = obj.get("frame_no",    0)
-        speed_kmh = obj.get("speed_km_h", obj.get("speed_m_s", 0.0) * 3.6)
+        speed_kmh = obj.get("speed_kmh", obj.get("speed_m_s", 0.0) * 3.6)
         move_dir  = obj.get("move_dir",   "")
         direction = obj.get("direction", "")
         body_lean = obj.get("body_lean",   None)

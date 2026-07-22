@@ -24,7 +24,7 @@ Queue item format  (one dict per tracked object per frame)
     "dx":         float,         # world displacement vector X since oldest history
     "dy":         float,         # world displacement vector Y since oldest history
     "speed_m_s":  float,         # instantaneous speed in m/s
-    "speed_km_h": float,         # same in km/h
+    "speed_kmh": float,         # same in km/h
     "bearing":    float | None,  # compass bearing in degrees (None if stationary)
     "direction":  str,           # human-readable reduced bearing
     "latitude":   float,         # GPS latitude
@@ -185,7 +185,7 @@ _CAM_CSV_COLUMNS = [
     "foot_px_y",     # foot-point pixel y
     "X_world_m",     # homography world X in metres
     "Y_world_m",     # homography world Y in metres
-    "speed_km_h",    # instantaneous speed
+    "speed_kmh",    # instantaneous speed
     "bearing_deg",   # compass bearing in degrees (blank if stationary)
     "direction",     # human-readable reduced bearing e.g. "NE"
     "move_dir",      # lateral direction: left/right/straight
@@ -824,7 +824,7 @@ def _pipeline_loop():
                     speed_m_s = math.hypot(dx, dy) / dt
                     bearing   = compute_bearing(dx, dy)
 
-                speed_km_h = speed_m_s * 3.6
+                speed_kmh = speed_m_s * 3.6
                 direction  = reduced_bearing(bearing)
                 lat, lon   = world_to_latlon(X, Y)
 
@@ -884,7 +884,7 @@ def _pipeline_loop():
                     "dx":         dx,
                     "dy":         dy,
                     "speed_m_s":  speed_m_s,
-                    "speed_km_h": speed_km_h,
+                    "speed_kmh": speed_kmh,
                     "bearing":    bearing,
                     "direction":  direction,
                     "latitude":   lat,
@@ -895,7 +895,7 @@ def _pipeline_loop():
                     # move_dir: lateral direction signal
                     # Pedestrians → pose-based (classify_pedestrian_move_direction)
                     # Vehicles    → px-history-based (get_lateral_direction)
-                    "move_dir": move_dir if label == "Pedestrian" else lateral_dir,
+                    "move_dir":   move_dir if label == "Pedestrian" else lateral_dir,
                     "kp_xy":      kp_xy,
                     "kp_conf":    kp_conf,
                     # TTRC — None if object not heading toward any conflict point
@@ -925,7 +925,7 @@ def _pipeline_loop():
                         "foot_px_y":    py,
                         "X_world_m":    round(X, 3),
                         "Y_world_m":    round(Y, 3),
-                        "speed_km_h":   round(speed_km_h, 2),
+                        "speed_kmh":   round(speed_kmh, 2),
                         "bearing_deg":  round(bearing, 1) if bearing is not None else "",
                         "direction":    direction,
                         "latitude":     round(lat, 7),
@@ -942,9 +942,9 @@ def _pipeline_loop():
                     color       = CLASS_COLORS.get(label, (200, 200, 200))
                     status_text = alert_status.get(obj_id, "")
                     if label == "Pedestrian":
-                        lbl = f"Ped ID:{obj_id} {direction} {speed_km_h:.1f}km/h {activity} {body_lean}"
+                        lbl = f"Ped ID:{obj_id} {direction} {speed_kmh:.1f}km/h {activity} {body_lean}"
                     else:
-                        lbl = f"{label} ID:{obj_id} {direction} {speed_km_h:.1f}km/h"
+                        lbl = f"{label} ID:{obj_id} {direction} {speed_kmh:.1f}km/h"
                     if status_text:
                         lbl += f" | {status_text}"
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -1029,7 +1029,7 @@ if __name__ == "__main__":
                     f"[TRACK] Frame#{obj['frame_no']:05d}  "
                     f"Timestamp = {obj['timestamp']}"
                     f"ID:{obj['obj_id']:3d}  {obj['label']:12s}  "
-                    f"{obj['speed_km_h']:5.1f}km/h  "
+                    f"{obj['speed_kmh']:5.1f}km/h  "
                     f"lat={obj['latitude']:.6f}  lon={obj['longitude']:.6f}  "
                     f"activity={obj['activity'] or '-'}"
                     f"body_lean={obj['body_lean'] or '-'}"
