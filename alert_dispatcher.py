@@ -52,14 +52,14 @@ def _vms_lines_for(label: str, track_id, source: str,
 
     # Single-object VMS lines per class
     single = {
-        "Pedestrian":     ("PEDESTRIAN",  f"AHEAD {tag}"),
-        "Bicycle":        ("BICYCLE",     f"AHEAD {tag}"),
-        "Two-wheeler":    ("TWO WHEELER", f"AHEAD {tag}"),
-        "Three-wheeler":  ("THREE WHEEL", f"AHEAD {tag}"),
-        "Car":            ("CAR",         f"AHEAD {tag}"),
-        "Tempo-traveller":("TEMPO TRVLR", f"AHEAD {tag}"),
-        "Bus":            ("BUS",         f"AHEAD {tag}"),
-        "Heavy Vehicle":  ("HEAVY VEH",   f"AHEAD {tag}"),
+        "Pedestrian":     ("PEDESTRIAN",  f"in 100m {tag}"),
+        "Bicycle":        ("BICYCLE",     f"in 100m {tag}"),
+        "Two-wheeler":    ("TWO WHEELER", f"in 100m {tag}"),
+        "Three-wheeler":  ("THREE WHEEL", f"in 100m {tag}"),
+        "Car":            ("CAR",         f"in 100m {tag}"),
+        "Tempo-traveller":("TEMPO TRVLR", f"in 100m {tag}"),
+        "Bus":            ("BUS",         f"in 100m {tag}"),
+        "Heavy Vehicle":  ("HEAVY VEH",   f"in 100m {tag}"),
     }
 
     # Group VMS lines per class (used when > GROUP_ALERT_COUNT in frame)
